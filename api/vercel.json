@@ -1,0 +1,8 @@
+{
+  "functions": {
+    "api/get-token.js": {
+      "maxDuration": 45,
+      "memory": 1024
+    }
+  }
+}
