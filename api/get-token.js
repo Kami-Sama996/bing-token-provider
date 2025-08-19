@@ -1,67 +1,56 @@
-// api/get-token.js
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chrome-aws-lambda');
 
-// Helper function để xử lý lỗi một cách nhất quán
-const handleError = (res, message, statusCode = 500) => {
-    console.error(message);
-    return res.status(statusCode).json({ success: false, message });
-};
-
+// Hàm handler chính của Vercel Serverless Function
 module.exports = async (req, res) => {
+    let browser = null;
     try {
-        const translatorUrl = "https://www.bing.com/translator";
-        const response = await fetch(translatorUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36'
+        // Khởi tạo trình duyệt ảo với các thiết lập mới nhất
+        browser = await puppeteer.launch({
+            args: chromium.args,
+            defaultViewport: chromium.defaultViewport,
+            executablePath: await chromium.executablePath,
+            headless: chromium.headless,
+            ignoreHTTPSErrors: true,
+        });
+
+        const page = await browser.newPage();
+        
+        let token = null;
+        // Bắt đầu "lắng nghe" các yêu cầu mạng của trang
+        page.on('response', async (response) => {
+            const url = response.url();
+            // Đây là URL mục tiêu chứa TrustedClientToken
+            if (url.includes('edge.microsoft.com/speech/voices/list')) {
+                const headers = response.headers();
+                if (headers['x-msttsaccesstoken']) {
+                    token = headers['x-msttsaccesstoken'];
+                }
             }
         });
 
-        if (!response.ok) {
-            return handleError(res, `Không thể truy cập Bing Translator. Status code: ${response.status}`);
-        }
-
-        const html = await response.text();
-
-        // Trích xuất IG
-        const igMatch = html.match(/IG:"([A-Za-z0-9]+)"/);
-        if (!igMatch || !igMatch[1]) {
-            return handleError(res, "Không thể tìm thấy IG. Cấu trúc trang Bing có thể đã thay đổi.");
-        }
-        const IG = igMatch[1];
-
-        // Trích xuất IID
-        const iidMatch = html.match(/data-iid="([^"]+)"/);
-        if (!iidMatch || !iidMatch[1]) {
-            return handleError(res, "Không thể tìm thấy IID. Cấu trúc trang Bing có thể đã thay đổi.");
-        }
-        const IID = iidMatch[1];
-
-        // Trích xuất key và token từ params_AbusePreventionHelper
-        const paramsMatch = html.match(/var params_AbusePreventionHelper\s?=\s?(\[.*?\]);/);
-        if (!paramsMatch || !paramsMatch[1]) {
-            return handleError(res, "Không thể tìm thấy params_AbusePreventionHelper. Cấu trúc trang Bing có thể đã thay đổi.");
-        }
-        
-        const params = JSON.parse(paramsMatch[1]);
-        const key = params[0];
-        const token = params[1];
-        const tokenExpiryInterval = params[3];
-
-        if (!key || !token) {
-             return handleError(res, "Không thể trích xuất key hoặc token từ params.");
-        }
-
-        // Trả về tất cả dữ liệu cần thiết
-        res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate'); // Cache trong 10 phút
-        res.status(200).json({
-            success: true,
-            IG,
-            IID,
-            key,
-            token,
-            tokenExpiryInterval
+        // Điều hướng đến một trang hỗ trợ của Microsoft để kích hoạt việc tạo token
+        await page.goto('https://support.microsoft.com/en-us/office/use-the-read-aloud-feature-to-listen-to-text-in-edge-32f2463a-3f3f-4e55-9781-54607b4c952b', {
+            waitUntil: 'networkidle0' // Đợi cho đến khi mạng gần như không hoạt động
         });
 
+        // Đợi một chút để đảm bảo sự kiện 'response' đã được xử lý
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        if (token) {
+            // Trả về token nếu thành công
+            res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate'); // Cache kết quả trong 10 phút
+            res.status(200).json({ success: true, token: token });
+        } else {
+            res.status(500).json({ success: false, message: 'Không thể tìm thấy token. API của Microsoft có thể đã thay đổi.' });
+        }
+
     } catch (error) {
-        return handleError(res, `Đã xảy ra lỗi phía máy chủ: ${error.message}`);
+        console.error(error);
+        res.status(500).json({ success: false, message: 'Đã xảy ra lỗi phía máy chủ khi lấy token.' });
+    } finally {
+        if (browser !== null) {
+            await browser.close();
+        }
     }
 };
